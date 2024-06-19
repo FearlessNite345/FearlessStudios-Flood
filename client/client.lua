@@ -1,56 +1,165 @@
 local increment = 0.1
-local maxWaterLevel = 150.0
 local flooding = false
+local isFlooded = false
+local maxFlood
+local floodThresholds = { 25, 50, 75, 100, 125, 150 }
+local intervalBetweenIncrement
 
-Citizen.CreateThread(function ()
-    LoadWaterFromPath(GetCurrentResourceName(), 'waterLevels/base.xml')
+RegisterNetEvent('FearlessStudios-Flood:StartFlood', function(floodLevel)
+    floodLevel = tonumber(floodLevel)
+
+    if floodLevel == nil then
+        print('Error: you did not provide a flood level')
+    else
+        if IsValidFloodLevel(floodLevel) then
+            maxFlood = floodLevel
+            
+            intervalBetweenIncrement = CalculateIncrementInterval(maxFlood, increment, Config.floodTime)
+
+            if not isFlooded then
+                flooding = true
+                TriggerServerEvent('FearlessStudios-Flood:UpdateFloodStatus', flooding, isFlooded)
+                print('Flooding started')
+                Citizen.Wait(2500)
+                ResetLevels()
+                LoadWaterFromPath(GetCurrentResourceName(), 'waterLevels/base.xml')
+                Citizen.CreateThread(function()
+                    while flooding do
+                        local waterQuadCount = GetWaterQuadCount()
+                        local allQuadsAtMax = true
+                        local newLevel
+
+                        for i = 1, waterQuadCount do
+                            local success, waterQuadLevel = GetWaterQuadLevel(i)
+                            if success then
+                                newLevel = waterQuadLevel + increment
+                                if newLevel <= maxFlood then
+                                    SetWaterQuadLevel(i, newLevel)
+                                    allQuadsAtMax = false
+                                else
+                                    SetWaterQuadLevel(i, maxFlood)
+                                end
+                            end
+                        end
+
+                        HandleLevelUpdate(newLevel)
+
+                        if allQuadsAtMax then
+                            flooding = false
+                        end
+
+                        Citizen.Wait(intervalBetweenIncrement) -- Adjust the interval as needed
+                    end
+
+                    print('Flooding ended')
+                    isFlooded = true
+                    TriggerServerEvent('FearlessStudios-Flood:UpdateFloodStatus', flooding, isFlooded)
+                end)
+            end
+        end
+    end
 end)
 
-RegisterCommand('flood', function()
-    if not flooding then
-        flooding = true
-        Citizen.CreateThread(function()
-            while flooding do
-                local waterQuadCount = GetWaterQuadCount()
-                local waveQuadCount = GetWaveQuadCount()
-                local allQuadsAtMax = true
+RegisterNetEvent('FearlessStudios-Flood:ResetFlood', function()
+    ResetWater()
+    flooding = false
+    isFlooded = false
+    TriggerServerEvent('FearlessStudios-Flood:UpdateFloodStatus', flooding, isFlooded)
+    print("Water level reset")
+end)
 
-                print(GetEntityCoords(PlayerPedId(), false).z)
+RegisterNetEvent('FearlessStudios-Flood:RevertFlood', function()
+    if flooding or isFlooded then
+        flooding = false -- Stop any ongoing flooding
+        TriggerServerEvent('FearlessStudios-Flood:UpdateFloodStatus', flooding, isFlooded)
+
+        Citizen.CreateThread(function()
+            print('Reverting flood started')
+            local waterQuadCount = GetWaterQuadCount()
+            local allQuadsAtMin = false
+
+            while not allQuadsAtMin do
+                allQuadsAtMin = true
+                local newLevel
 
                 for i = 1, waterQuadCount do
                     local success, waterQuadLevel = GetWaterQuadLevel(i)
                     if success then
-                        local newLevel = waterQuadLevel + increment
-                        if newLevel <= maxWaterLevel then
+                        newLevel = waterQuadLevel - increment
+                        if newLevel >= 0 then
                             SetWaterQuadLevel(i, newLevel)
-                            allQuadsAtMax = false
+                            allQuadsAtMin = false
                         else
-                            SetWaterQuadLevel(i, maxWaterLevel)
+                            SetWaterQuadLevel(i, 0.0)
                         end
                     end
                 end
 
-                if allQuadsAtMax then
-                    flooding = false
-                end
+                HandleLevelRevert(newLevel)
 
-                Citizen.Wait(Config.floodInterval) -- Adjust the interval as needed
+                Citizen.Wait(intervalBetweenIncrement) -- Adjust the interval as needed
             end
 
-            print('Flooding ended')
+            print('Flooding fully reverted')
+            ResetWater()
+            isFlooded = false
+            TriggerServerEvent('FearlessStudios-Flood:UpdateFloodStatus', flooding, isFlooded)
         end)
+    else
+        print('No flood to revert')
     end
-end, false)
+end)
 
-RegisterCommand('resetFlood', function()
-    ResetWater()
-    flooding = false
-    print("Water level and waves reset.")
-end, false)
+-- Table to keep track of levels that have already been hit
+local levelsReached = {}
 
-function DisableAllCalmingQuads()
-    local calmingQuadCount = GetCalmingQuadCount()
-    for i = 1, calmingQuadCount do
-        SetCalmingQuadDampening(i, 0.0)
+-- Function to handle level updates
+function HandleLevelUpdate(newLevel)
+    for _, threshold in ipairs(floodThresholds) do
+        if newLevel >= threshold and not levelsReached[threshold] then
+            print('Reached ' .. threshold)
+            levelsReached[threshold] = true
+            LoadWaterFromPath(GetCurrentResourceName(), 'waterLevels/base-' .. threshold .. '.xml')
+        end
     end
+end
+
+function HandleLevelRevert(newLevel)
+    for i = #floodThresholds, 1, -1 do
+        local threshold = floodThresholds[i]
+        if newLevel < threshold and levelsReached[threshold] then
+            print('Reverted from ' .. threshold)
+            levelsReached[threshold] = false
+            LoadWaterFromPath(GetCurrentResourceName(), 'waterLevels/base-' .. threshold .. '.xml')
+        end
+    end
+end
+
+function IsValidFloodLevel(level)
+    level = tonumber(level)
+    for _, threshold in ipairs(floodThresholds) do
+        if level == threshold then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- Function to reset the levels
+function ResetLevels()
+    levelsReached = {}
+end
+
+function CalculateIncrementInterval(targetValue, increment, totalTimeSeconds)
+    -- Calculate the total number of increments needed to reach the target value
+    local totalIncrements = targetValue / increment
+
+    -- Convert the total time duration from seconds to milliseconds
+    local totalTimeMilliseconds = totalTimeSeconds * 1000
+
+    -- Calculate the milliseconds per increment
+    local millisecondsPerIncrement = totalTimeMilliseconds / totalIncrements
+
+    return millisecondsPerIncrement
 end
